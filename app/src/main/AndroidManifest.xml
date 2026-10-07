@@ -2,112 +2,49 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ========================================================= -->
-    <!-- INTERNET                                                   -->
-    <!-- ========================================================= -->
+    <!-- Internet -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Speed test, Internet connectivity checks, etc. -->
-    <uses-permission
-        android:name="android.permission.INTERNET" />
+    <!-- Wi-Fi -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
-    <!-- Check Wi-Fi state -->
-    <uses-permission
-        android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Wi-Fi scan / network discovery -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Allow Wi-Fi state changes if required by Android/device -->
-    <uses-permission
-        android:name="android.permission.CHANGE_WIFI_STATE" />
-
-
-    <!-- ========================================================= -->
-    <!-- WI-FI SCANNING                                             -->
-    <!-- ========================================================= -->
-
-    <!--
-        Android 12 and below:
-        Wi-Fi scan results require location permission.
-    -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-    <uses-permission
-        android:name="android.permission.ACCESS_COARSE_LOCATION" />
-
-    <!--
-        Android 13+:
-        Nearby Wi-Fi devices permission.
-    -->
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
 
+    <!-- Mobile network information -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
-    <!-- ========================================================= -->
-    <!-- MOBILE 4G / 5G                                            -->
-    <!-- ========================================================= -->
+    <!-- AR camera -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Required to read mobile network information -->
-    <uses-permission
-        android:name="android.permission.READ_PHONE_STATE" />
-
-
-    <!-- ========================================================= -->
-    <!-- CAMERA / ARCORE                                            -->
-    <!-- ========================================================= -->
-
-    <!-- Required by ARCore and ArCameraView -->
-    <uses-permission
-        android:name="android.permission.CAMERA" />
-
-    <!--
-        Declare that camera hardware is not mandatory for installing
-        the application. The app can still run its non-AR features
-        on devices without AR support.
-    -->
+    <!-- Camera is optional -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
 
-    <!--
-        ARCore capable device declaration.
-
-        required="false" means the app can install on devices
-        without ARCore. The application itself checks ARCore
-        availability before starting an AR session.
-    -->
+    <!-- ARCore is optional -->
     <uses-feature
         android:name="android.hardware.camera.ar"
         android:required="false" />
 
-
-    <!-- ========================================================= -->
-    <!-- APPLICATION                                                 -->
-    <!-- ========================================================= -->
-
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="NetScope"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.NetworkAR">
-
-        <!-- ===================================================== -->
-        <!-- MAIN ACTIVITY                                         -->
-        <!-- ===================================================== -->
+        android:label="NetScope">
 
         <activity
             android:name=".MainActivity"
             android:exported="true">
 
             <intent-filter>
-
-                <action
-                    android:name="android.intent.action.MAIN" />
-
-                <category
-                    android:name="android.intent.category.LAUNCHER" />
-
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
         </activity>
