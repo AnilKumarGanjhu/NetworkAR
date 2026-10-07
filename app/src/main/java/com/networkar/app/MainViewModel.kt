@@ -3,7 +3,6 @@ package com.networkar.app
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.room.Room
 import com.networkar.app.data.AppDatabase
 import com.networkar.app.data.Measurement
 import com.networkar.app.network.InternetInfo
@@ -20,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
 
 data class UiState(
 
@@ -112,13 +112,10 @@ class MainViewModel(
     // ---------------------------------------------------------
 
     private val db =
-        Room.databaseBuilder(
-            application.applicationContext,
-            AppDatabase::class.java,
-            "networkar.db"
-        )
-            .fallbackToDestructiveMigration()
-            .build()
+        AppDatabase.getInstance(application)
+
+    private val dao =
+        db.measurementDao()
 
     // ---------------------------------------------------------
     // Network scanner
@@ -149,7 +146,7 @@ class MainViewModel(
     // ---------------------------------------------------------
 
     val history =
-        db.measurementDao().all()
+        dao.getAll()
 
 
     // =========================================================
@@ -164,7 +161,7 @@ class MainViewModel(
      * - Internet connectivity
      * - Active network
      *
-     * This does NOT perform a nearby Wi-Fi scan.
+     * Does NOT perform nearby Wi-Fi scan.
      */
     fun refresh() {
 
@@ -432,10 +429,7 @@ class MainViewModel(
     // =========================================================
 
     /**
-     * Performs a nearby Wi-Fi scan.
-     *
-     * This is intentionally separate from refresh()
-     * because Android can throttle Wi-Fi scans.
+     * Performs nearby Wi-Fi scan.
      */
     fun scanWifi() {
 
@@ -594,40 +588,28 @@ class MainViewModel(
 
         val signalDbm =
             if (useWifi) {
-
                 state.wifiDbm
-
             } else {
-
-                state.mobileDbm
-                    ?: -120
+                state.mobileDbm ?: -120
             }
 
         val signalPercent =
             if (SignalUtils.isValid(signalDbm)) {
-
-                SignalUtils.percent(
-                    signalDbm
-                )
-
+                SignalUtils.percent(signalDbm)
             } else {
                 0
             }
 
         val quality =
             if (SignalUtils.isValid(signalDbm)) {
-
-                SignalUtils.quality(
-                    signalDbm
-                )
-
+                SignalUtils.quality(signalDbm)
             } else {
                 "UNAVAILABLE"
             }
 
         withContext(Dispatchers.IO) {
 
-            db.measurementDao().insert(
+            dao.insert(
 
                 Measurement(
 
@@ -655,10 +637,10 @@ class MainViewModel(
                         result.uploadMbps,
 
                     pingMs =
-                        result.pingMs,
+                        result.pingMs.toLong(),
 
                     jitterMs =
-                        result.jitterMs
+                        result.jitterMs.toLong()
                 )
             )
         }
@@ -670,8 +652,7 @@ class MainViewModel(
     // =========================================================
 
     /**
-     * Saves the current network signal
-     * into Room history.
+     * Saves current Wi-Fi/mobile signal into Room.
      */
     fun sample() {
 
@@ -689,12 +670,7 @@ class MainViewModel(
                 return@launch
             }
 
-            applyNetworkStatus(
-                status
-            )
-
-            val state =
-                _ui.value
+            applyNetworkStatus(status)
 
             val useWifi =
                 status.internet.transport == "Wi-Fi" &&
@@ -759,7 +735,7 @@ class MainViewModel(
 
             withContext(Dispatchers.IO) {
 
-                db.measurementDao().insert(
+                dao.insert(
 
                     Measurement(
 
@@ -793,7 +769,7 @@ class MainViewModel(
     /**
      * Stores one AR signal measurement.
      *
-     * x/y/z represent the AR world position.
+     * x/y/z represent AR world position.
      */
     fun arSample(
         x: Float,
@@ -805,9 +781,7 @@ class MainViewModel(
         val quality =
             if (SignalUtils.isValid(dbm)) {
 
-                SignalUtils.quality(
-                    dbm
-                )
+                SignalUtils.quality(dbm)
 
             } else {
                 "UNAVAILABLE"
@@ -816,9 +790,7 @@ class MainViewModel(
         val signalPercent =
             if (SignalUtils.isValid(dbm)) {
 
-                SignalUtils.percent(
-                    dbm
-                )
+                SignalUtils.percent(dbm)
 
             } else {
                 0
@@ -849,7 +821,7 @@ class MainViewModel(
 
             withContext(Dispatchers.IO) {
 
-                db.measurementDao().insert(
+                dao.insert(
 
                     Measurement(
 
@@ -927,7 +899,7 @@ class MainViewModel(
 
             withContext(Dispatchers.IO) {
 
-                db.measurementDao().clear()
+                dao.deleteAll()
             }
 
             resetArCount()
@@ -943,6 +915,7 @@ class MainViewModel(
 
         super.onCleared()
 
-        db.close()
+        // AppDatabase singleton ko yahan close nahi karna.
+        // Room database application lifetime tak available rahega.
     }
 }
