@@ -1,285 +1,1029 @@
 package com.networkar.app.ar
 
-import android.app.Activity
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.Matrix
+import android.os.SystemClock
+import android.util.AttributeSet
 import android.view.Surface
+import android.view.View
+import androidx.core.content.ContextCompat
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
-import com.google.ar.core.exceptions.CameraNotAvailableException
-import com.networkar.app.network.WifiScanner
+import com.google.ar.core.TrackingState
+import com.networkar.app.network.NetworkScanner
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
-import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.abs
 
-class ArCameraView(
+class ArCameraView @JvmOverloads constructor(
     context: Context,
-    private val onSample: (x: Float, y: Float, z: Float, dbm: Int) -> Unit,
-    private val onStatus: (String) -> Unit
-) : GLSurfaceView(context), GLSurfaceView.Renderer {
+    attrs: AttributeSet? = null,
+    defStyleAttr: Int = 0,
+    private val onSample: (x: Float, y: Float, z: Float, dbm: Int) -> Unit = { _, _, _, _ -> },
+    private val onStatus: (String) -> Unit = {}
+) : GLSurfaceView(context, attrs, defStyleAttr),
+    GLSurfaceView.Renderer,
+    SurfaceTexture.OnFrameAvailableListener {
 
-    private val activity = context as Activity
-    private val wifi = WifiScanner(context)
+    private val appContext =
+        context.applicationContext
+
+    private val networkScanner =
+        NetworkScanner(appContext)
+
     private var session: Session? = null
-    private var frame: Frame? = null
-    private var viewportWidth = 1
-    private var viewportHeight = 1
-    private var lastRotation = -1
-    private var lastSampleMs = 0L
-    private val running = AtomicBoolean(false)
-    private val renderer = ArPointRenderer()
 
-    init {
-        setEGLContextClientVersion(2)
-        setRenderer(this)
-        renderMode = RENDERMODE_CONTINUOUSLY
-        preserveEGLContextOnPause = true
+    private var cameraTexture: SurfaceTexture? = null
+
+    private var cameraTextureId = -1
+
+    private var program = 0
+
+    private var positionHandle = -1
+    private var texCoordHandle = -1
+    private var textureHandle = -1
+
+    private var positionBuffer: FloatBuffer? = null
+    private var textureBuffer: FloatBuffer? = null
+
+    private val viewMatrix =
+        FloatArray(16)
+
+    private val projectionMatrix =
+        FloatArray(16)
+
+    private val textureTransform =
+        FloatArray(16)
+
+    private val cameraTexCoords =
+        FloatArray(8)
+
+    private val cameraTextureCoords =
+        FloatArray(8)
+
+    private val frameAvailable =
+        AtomicBoolean(false)
+
+    private var resumed = false
+
+    private var closed = false
+
+    private var lastSampleTime = 0L
+
+    private var lastX = Float.NaN
+    private var lastY = Float.NaN
+    private var lastZ = Float.NaN
+
+    companion object {
+
+        private const val SAMPLE_INTERVAL_MS =
+            500L
+
+        private const val POSITION_CHANGE_THRESHOLD =
+            0.05f
+
+        private const val VERTEX_SHADER = """
+            attribute vec4 a_Position;
+            attribute vec2 a_TexCoord;
+
+            uniform mat4 u_TextureTransform;
+
+            varying vec2 v_TexCoord;
+
+            void main() {
+                gl_Position = a_Position;
+
+                vec4 transformed =
+                    u_TextureTransform *
+                    vec4(a_TexCoord, 0.0, 1.0);
+
+                v_TexCoord =
+                    transformed.xy;
+            }
+        """
+
+        private const val FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+
+            precision mediump float;
+
+            uniform samplerExternalOES u_Texture;
+
+            varying vec2 v_TexCoord;
+
+            void main() {
+                gl_FragColor =
+                    texture2D(
+                        u_Texture,
+                        v_TexCoord
+                    );
+            }
+        """
+
+        private val QUAD_COORDS = floatArrayOf(
+            -1f, -1f,
+             1f, -1f,
+            -1f,  1f,
+             1f,  1f
+        )
+
+        private val TEX_COORDS = floatArrayOf(
+            0f, 1f,
+            1f, 1f,
+            0f, 0f,
+            1f, 0f
+        )
     }
 
+    init {
+
+        setEGLContextClientVersion(2)
+
+        setRenderer(this)
+
+        renderMode =
+            GLSurfaceView.RENDERMODE_CONTINUOUSLY
+
+        preserveEGLContextOnPause = true
+
+        positionBuffer =
+            createFloatBuffer(QUAD_COORDS)
+
+        textureBuffer =
+            createFloatBuffer(TEX_COORDS)
+
+        cameraTexCoords[0] = 0f
+        cameraTexCoords[1] = 0f
+        cameraTexCoords[2] = 1f
+        cameraTexCoords[3] = 0f
+        cameraTexCoords[4] = 0f
+        cameraTexCoords[5] = 1f
+        cameraTexCoords[6] = 1f
+        cameraTexCoords[7] = 1f
+    }
+
+    // ----------------------------------------------------------------
+    // Lifecycle
+    // ----------------------------------------------------------------
+
     fun resumeAr() {
-        if (!hasCameraPermission()) {
-            onStatus("Camera permission is required")
+
+        if (closed) {
             return
         }
-        try {
-            val install = ArCoreApk.getInstance().requestInstall(activity, true)
-            if (install != ArCoreApk.InstallStatus.INSTALLED) {
-                onStatus("Installing ARCore…")
-                return
-            }
-            if (session == null) {
-                session = Session(context)
-                session?.configure(Config(session).apply {
-                    updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-                    focusMode = Config.FocusMode.AUTO
-                })
-            }
-            session?.resume()
-            if (renderer.textureId >= 0) session?.setCameraTextureName(renderer.textureId)
-            super.onResume()
-            running.set(true)
-            onStatus("AR tracking active — move slowly around the room")
-        } catch (e: Exception) {
-            onStatus("AR unavailable: ${e.message ?: e.javaClass.simpleName}")
+
+        if (
+            ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.CAMERA
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            postStatus(
+                "Camera permission required"
+            )
+            return
         }
+
+        queueEvent {
+
+            try {
+
+                if (session == null) {
+
+                    createSession()
+
+                }
+
+                session?.resume()
+
+                resumed = true
+
+                postStatus(
+                    "AR camera started. Move phone slowly to initialize tracking."
+                )
+
+            } catch (e: Exception) {
+
+                resumed = false
+
+                postStatus(
+                    "AR start failed: ${e.message ?: "Unknown error"}"
+                )
+            }
+        }
+
+        onResume()
     }
 
     fun pauseAr() {
-        running.set(false)
-        try { session?.pause() } catch (_: Exception) { }
-        super.onPause()
+
+        if (closed) {
+            return
+        }
+
+        queueEvent {
+
+            try {
+
+                session?.pause()
+
+                resumed = false
+
+                postStatus(
+                    "Scan paused"
+                )
+
+            } catch (_: Exception) {
+                // Ignore lifecycle race.
+            }
+        }
+
+        onPause()
     }
 
     fun closeAr() {
-        pauseAr()
-        session?.close()
-        session = null
-    }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
-        renderer.create()
-        session?.setCameraTextureName(renderer.textureId)
-    }
+        if (closed) {
+            return
+        }
 
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        viewportWidth = width
-        viewportHeight = height
-        GLES20.glViewport(0, 0, width, height)
-    }
+        closed = true
+        resumed = false
 
-    override fun onDrawFrame(gl: GL10?) {
-        val s = session ?: return
+        queueEvent {
+
+            try {
+
+                session?.close()
+
+            } catch (_: Exception) {
+                // Ignore close errors.
+            }
+
+            session = null
+
+            cameraTexture?.release()
+            cameraTexture = null
+        }
+
         try {
-            val rotation = activity.windowManager.defaultDisplay.rotation
-            if (rotation != lastRotation) {
-                s.setDisplayGeometry(rotation, viewportWidth, viewportHeight)
-                lastRotation = rotation
-            }
-            val f = s.update()
-            frame = f
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-            renderer.drawCamera(f)
+            onPause()
+        } catch (_: Exception) {
+        }
+    }
 
-            val pose = f.camera.pose
-            renderer.drawPoints(pose.translation)
+    // ----------------------------------------------------------------
+    // ARCore Session
+    // ----------------------------------------------------------------
 
-            val now = System.currentTimeMillis()
-            if (running.get() && now - lastSampleMs >= 700L) {
-                lastSampleMs = now
-                val info = wifi.current()
-                val dbm = info?.rssi ?: -100
-                val p = pose.translation
-                val x = p[0]
-                val y = p[1]
-                val z = p[2]
-                onSample(x, y, z, dbm)
-                renderer.addPoint(x, y, z, dbm)
+    private fun createSession() {
+
+        if (session != null) {
+            return
+        }
+
+        val availability =
+            ArCoreApk.getInstance()
+                .checkAvailability(appContext)
+
+        if (!availability.isSupported) {
+
+            postStatus(
+                "ARCore is not supported on this device"
+            )
+
+            return
+        }
+
+        val newSession =
+            try {
+
+                Session(appContext)
+
+            } catch (e: Exception) {
+
+                postStatus(
+                    "Unable to create AR session: ${e.message}"
+                )
+
+                return
             }
-        } catch (_: CameraNotAvailableException) {
-            onStatus("Camera became unavailable — reopen AR Scan")
+
+        val config =
+            Config(newSession)
+
+        config.focusMode =
+            Config.FocusMode.AUTO
+
+        config.planeFindingMode =
+            Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+
+        config.lightEstimationMode =
+            Config.LightEstimationMode.AMBIENT_INTENSITY
+
+        newSession.configure(config)
+
+        session = newSession
+
+        postStatus(
+            "ARCore session ready"
+        )
+    }
+
+    // ----------------------------------------------------------------
+    // GLSurfaceView Renderer
+    // ----------------------------------------------------------------
+
+    override fun onSurfaceCreated(
+        gl: javax.microedition.khronos.opengles.GL10?,
+        config: javax.microedition.khronos.egl.EGLConfig?
+    ) {
+
+        GLES20.glClearColor(
+            0f,
+            0f,
+            0f,
+            1f
+        )
+
+        createCameraTexture()
+
+        program =
+            createProgram(
+                VERTEX_SHADER,
+                FRAGMENT_SHADER
+            )
+
+        positionHandle =
+            GLES20.glGetAttribLocation(
+                program,
+                "a_Position"
+            )
+
+        texCoordHandle =
+            GLES20.glGetAttribLocation(
+                program,
+                "a_TexCoord"
+            )
+
+        textureHandle =
+            GLES20.glGetUniformLocation(
+                program,
+                "u_Texture"
+            )
+
+        val transformHandle =
+            GLES20.glGetUniformLocation(
+                program,
+                "u_TextureTransform"
+            )
+
+        Matrix.setIdentityM(
+            textureTransform,
+            0
+        )
+
+        GLES20.glUseProgram(program)
+
+        GLES20.glUniformMatrix4fv(
+            transformHandle,
+            1,
+            false,
+            textureTransform,
+            0
+        )
+
+        GLES20.glDisable(
+            GLES20.GL_DEPTH_TEST
+        )
+
+        GLES20.glDisable(
+            GLES20.GL_CULL_FACE
+        )
+    }
+
+    override fun onSurfaceChanged(
+        gl: javax.microedition.khronos.opengles.GL10?,
+        width: Int,
+        height: Int
+    ) {
+
+        GLES20.glViewport(
+            0,
+            0,
+            width,
+            height
+        )
+
+        if (height > 0) {
+
+            val aspect =
+                width.toFloat() /
+                    height.toFloat()
+
+            Matrix.perspectiveM(
+                projectionMatrix,
+                0,
+                60f,
+                aspect,
+                0.01f,
+                100f
+            )
+        }
+
+        session?.setDisplayGeometry(
+            Surface.ROTATION_0,
+            width,
+            height
+        )
+    }
+
+    override fun onDrawFrame(
+        gl: javax.microedition.khronos.opengles.GL10?
+    ) {
+
+        GLES20.glClear(
+            GLES20.GL_COLOR_BUFFER_BIT
+        )
+
+        val currentSession =
+            session
+                ?: return
+
+        if (!resumed) {
+            return
+        }
+
+        try {
+
+            currentSession.setCameraTextureName(
+                cameraTextureId
+            )
+
+            val frame =
+                currentSession.update()
+
+            frameAvailable.set(false)
+
+            updateTextureTransform(frame)
+
+            renderCameraBackground()
+
+            processFrame(
+                frame
+            )
+
         } catch (e: Exception) {
-            onStatus("AR frame error: ${e.message ?: "unknown"}")
+
+            postStatus(
+                "AR frame error: ${e.message ?: "Unknown error"}"
+            )
         }
     }
 
-    private fun hasCameraPermission() =
-        androidx.core.content.ContextCompat.checkSelfPermission(
-            context, android.Manifest.permission.CAMERA
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    // ----------------------------------------------------------------
+    // Camera texture
+    // ----------------------------------------------------------------
 
-    private class ArPointRenderer {
-        var textureId: Int = -1
-            private set
-        private var cameraProgram = 0
-        private var pointProgram = 0
-        private var cameraPos = -1
-        private var cameraTex = -1
-        private var pointMvp = -1
-        private var pointPos = -1
-        private var pointColor = -1
-        private val points = mutableListOf<Point>()
-        private val quad: FloatBuffer = floatBuffer(floatArrayOf(
-            -1f, -1f, 0f, 1f,
-             1f, -1f, 1f, 1f,
-            -1f,  1f, 0f, 0f,
-             1f,  1f, 1f, 0f
-        ))
+    private fun createCameraTexture() {
 
-        fun create() {
-            textureId = createExternalTexture()
-            cameraProgram = program(CAMERA_VS, CAMERA_FS)
-            cameraPos = GLES20.glGetAttribLocation(cameraProgram, "aPosition")
-            cameraTex = GLES20.glGetUniformLocation(cameraProgram, "uTexture")
-            pointProgram = program(POINT_VS, POINT_FS)
-            pointMvp = GLES20.glGetUniformLocation(pointProgram, "uMvp")
-            pointPos = GLES20.glGetAttribLocation(pointProgram, "aPosition")
-            pointColor = GLES20.glGetUniformLocation(pointProgram, "uColor")
+        val textures =
+            IntArray(1)
+
+        GLES20.glGenTextures(
+            1,
+            textures,
+            0
+        )
+
+        cameraTextureId =
+            textures[0]
+
+        GLES20.glBindTexture(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            cameraTextureId
+        )
+
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_MIN_FILTER,
+            GLES20.GL_LINEAR
+        )
+
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_MAG_FILTER,
+            GLES20.GL_LINEAR
+        )
+
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_WRAP_S,
+            GLES20.GL_CLAMP_TO_EDGE
+        )
+
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_WRAP_T,
+            GLES20.GL_CLAMP_TO_EDGE
+        )
+
+        cameraTexture =
+            SurfaceTexture(
+                cameraTextureId
+            )
+
+        cameraTexture?.setOnFrameAvailableListener(
+            this
+        )
+    }
+
+    override fun onFrameAvailable(
+        surfaceTexture: SurfaceTexture?
+    ) {
+
+        frameAvailable.set(true)
+    }
+
+    // ----------------------------------------------------------------
+    // Camera background rendering
+    // ----------------------------------------------------------------
+
+    private fun renderCameraBackground() {
+
+        if (program == 0) {
+            return
         }
 
-        fun drawCamera(frame: Frame) {
-            if (cameraProgram == 0) return
-            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-            GLES20.glUseProgram(cameraProgram)
-            quad.position(0)
-            GLES20.glEnableVertexAttribArray(cameraPos)
-            GLES20.glVertexAttribPointer(cameraPos, 2, GLES20.GL_FLOAT, false, 16, quad)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-            GLES20.glUniform1i(cameraTex, 0)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glDisableVertexAttribArray(cameraPos)
-        }
+        GLES20.glUseProgram(
+            program
+        )
 
-        fun addPoint(x: Float, y: Float, z: Float, dbm: Int) {
-            synchronized(points) {
-                points += Point(x, y, z, dbm)
-                if (points.size > 250) points.removeAt(0)
+        GLES20.glDisable(
+            GLES20.GL_DEPTH_TEST
+        )
+
+        GLES20.glDisable(
+            GLES20.GL_CULL_FACE
+        )
+
+        positionBuffer?.position(0)
+
+        GLES20.glEnableVertexAttribArray(
+            positionHandle
+        )
+
+        GLES20.glVertexAttribPointer(
+            positionHandle,
+            2,
+            GLES20.GL_FLOAT,
+            false,
+            0,
+            positionBuffer
+        )
+
+        textureBuffer?.position(0)
+
+        GLES20.glEnableVertexAttribArray(
+            texCoordHandle
+        )
+
+        GLES20.glVertexAttribPointer(
+            texCoordHandle,
+            2,
+            GLES20.GL_FLOAT,
+            false,
+            0,
+            textureBuffer
+        )
+
+        GLES20.glActiveTexture(
+            GLES20.GL_TEXTURE0
+        )
+
+        GLES20.glBindTexture(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            cameraTextureId
+        )
+
+        GLES20.glUniform1i(
+            textureHandle,
+            0
+        )
+
+        val transformHandle =
+            GLES20.glGetUniformLocation(
+                program,
+                "u_TextureTransform"
+            )
+
+        GLES20.glUniformMatrix4fv(
+            transformHandle,
+            1,
+            false,
+            textureTransform,
+            0
+        )
+
+        GLES20.glDrawArrays(
+            GLES20.GL_TRIANGLE_STRIP,
+            0,
+            4
+        )
+
+        GLES20.glDisableVertexAttribArray(
+            positionHandle
+        )
+
+        GLES20.glDisableVertexAttribArray(
+            texCoordHandle
+        )
+    }
+
+    private fun updateTextureTransform(
+        frame: Frame
+    ) {
+
+        try {
+
+            val input =
+                floatArrayOf(
+                    0f, 0f,
+                    1f, 0f,
+                    0f, 1f,
+                    1f, 1f
+                )
+
+            val output =
+                FloatArray(8)
+
+            frame.transformCoordinates2d(
+                com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                input,
+                com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED,
+                output
+            )
+
+            for (i in 0 until 8) {
+                cameraTexCoords[i] =
+                    output[i]
             }
-        }
 
-        fun drawPoints(cameraPosition: FloatArray) {
-            if (pointProgram == 0) return
-            // Points are drawn as a simple world-space trail around the tracked camera.
-            // The renderer keeps them visible as a lightweight AR heatmap trail.
-            GLES20.glEnable(GLES20.GL_BLEND)
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-            GLES20.glUseProgram(pointProgram)
-            synchronized(points) {
-                for (p in points) {
-                    val dx = p.x - cameraPosition[0]
-                    val dy = p.y - cameraPosition[1]
-                    val dz = p.z - cameraPosition[2]
-                    if (kotlin.math.abs(dz) > 0.05f) {
-                        val sx = (dx / max(0.5f, kotlin.math.abs(dz))).coerceIn(-1.2f, 1.2f)
-                        val sy = (dy / max(0.5f, kotlin.math.abs(dz))).coerceIn(-1.2f, 1.2f)
-                        val mvp = floatArrayOf(
-                            1f,0f,0f,0f, 0f,1f,0f,0f, 0f,0f,1f,0f, 0f,0f,0f,1f
-                        )
-                        mvp[12] = sx * 0.35f
-                        mvp[13] = sy * 0.35f
-                        GLES20.glUniformMatrix4fv(pointMvp, 1, false, mvp, 0)
-                        GLES20.glVertexAttrib4f(pointPos, 0f, 0f, 0f, 1f)
-                        val q = qualityColor(p.dbm)
-                        GLES20.glUniform4f(pointColor, q[0], q[1], q[2], 0.85f)
-                        GLES20.glPointSize(28f)
-                        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, 1)
-                    }
-                }
-            }
-            GLES20.glDisable(GLES20.GL_BLEND)
-        }
+            textureBuffer =
+                createFloatBuffer(
+                    cameraTexCoords
+                )
 
-        private fun qualityColor(dbm: Int): FloatArray = when {
-            dbm >= -55 -> floatArrayOf(0.1f, 0.95f, 0.45f)
-            dbm >= -70 -> floatArrayOf(1f, 0.8f, 0.1f)
-            else -> floatArrayOf(1f, 0.18f, 0.18f)
-        }
+        } catch (_: Exception) {
 
-        private fun createExternalTexture(): Int {
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, ids[0])
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            return ids[0]
-        }
-
-        private fun program(vs: String, fs: String): Int {
-            val v = compile(GLES20.GL_VERTEX_SHADER, vs)
-            val f = compile(GLES20.GL_FRAGMENT_SHADER, fs)
-            val p = GLES20.glCreateProgram()
-            GLES20.glAttachShader(p, v); GLES20.glAttachShader(p, f); GLES20.glLinkProgram(p)
-            return p
-        }
-
-        private fun compile(type: Int, source: String): Int {
-            val s = GLES20.glCreateShader(type)
-            GLES20.glShaderSource(s, source); GLES20.glCompileShader(s)
-            return s
-        }
-
-        private data class Point(val x: Float, val y: Float, val z: Float, val dbm: Int)
-
-        companion object {
-            private const val CAMERA_VS = """
-                attribute vec4 aPosition;
-                varying vec2 vTex;
-                void main(){ gl_Position=aPosition; vTex=aPosition.xy*0.5+0.5; }
-            """
-            private const val CAMERA_FS = """
-                #extension GL_OES_EGL_image_external : require
-                precision mediump float;
-                uniform samplerExternalOES uTexture;
-                varying vec2 vTex;
-                void main(){ gl_FragColor=texture2D(uTexture, vec2(vTex.x, 1.0-vTex.y)); }
-            """
-            private const val POINT_VS = """
-                attribute vec4 aPosition;
-                uniform mat4 uMvp;
-                void main(){ gl_Position=uMvp*aPosition; }
-            """
-            private const val POINT_FS = """
-                precision mediump float;
-                uniform vec4 uColor;
-                void main(){ gl_FragColor=uColor; }
-            """
+            // Keep previous texture coordinates.
         }
     }
 
-    companion object {
-        private fun floatBuffer(data: FloatArray): FloatBuffer =
-            ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(data); position(0) }
+    // ----------------------------------------------------------------
+    // AR frame processing
+    // ----------------------------------------------------------------
+
+    private fun processFrame(
+        frame: Frame
+    ) {
+
+        val camera =
+            frame.camera
+
+        when (camera.trackingState) {
+
+            TrackingState.TRACKING -> {
+
+                postStatus(
+                    "Tracking OK • Move slowly around the room"
+                )
+
+                collectSignalSample(
+                    frame
+                )
+            }
+
+            TrackingState.PAUSED -> {
+
+                postStatus(
+                    "Tracking paused • Move phone to a textured area"
+                )
+            }
+
+            TrackingState.STOPPED -> {
+
+                postStatus(
+                    "Tracking stopped"
+                )
+            }
+        }
+    }
+
+    private fun collectSignalSample(
+        frame: Frame
+    ) {
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        if (
+            now - lastSampleTime <
+            SAMPLE_INTERVAL_MS
+        ) {
+            return
+        }
+
+        val camera =
+            frame.camera
+
+        val pose =
+            camera.pose
+
+        val x =
+            pose.tx()
+
+        val y =
+            pose.ty()
+
+        val z =
+            pose.tz()
+
+        val positionChanged =
+            if (
+                lastX.isNaN() ||
+                lastY.isNaN() ||
+                lastZ.isNaN()
+            ) {
+                true
+            } else {
+
+                abs(x - lastX) >=
+                    POSITION_CHANGE_THRESHOLD ||
+
+                abs(y - lastY) >=
+                    POSITION_CHANGE_THRESHOLD ||
+
+                abs(z - lastZ) >=
+                    POSITION_CHANGE_THRESHOLD
+            }
+
+        if (!positionChanged) {
+            return
+        }
+
+        val wifi =
+            networkScanner.currentWifi()
+
+        val dbm =
+            wifi?.rssi
+                ?: return
+
+        lastSampleTime =
+            now
+
+        lastX = x
+        lastY = y
+        lastZ = z
+
+        postSample(
+            x,
+            y,
+            z,
+            dbm
+        )
+    }
+
+    // ----------------------------------------------------------------
+    // Callbacks
+    // ----------------------------------------------------------------
+
+    private fun postSample(
+        x: Float,
+        y: Float,
+        z: Float,
+        dbm: Int
+    ) {
+
+        post {
+
+            try {
+
+                onSample(
+                    x,
+                    y,
+                    z,
+                    dbm
+                )
+
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun postStatus(
+        message: String
+    ) {
+
+        post {
+
+            try {
+
+                onStatus(
+                    message
+                )
+
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // OpenGL helpers
+    // ----------------------------------------------------------------
+
+    private fun createFloatBuffer(
+        values: FloatArray
+    ): FloatBuffer {
+
+        return ByteBuffer
+            .allocateDirect(
+                values.size * 4
+            )
+            .order(
+                ByteOrder.nativeOrder()
+            )
+            .asFloatBuffer()
+            .apply {
+                put(values)
+                position(0)
+            }
+    }
+
+    private fun loadShader(
+        type: Int,
+        source: String
+    ): Int {
+
+        val shader =
+            GLES20.glCreateShader(type)
+
+        if (shader == 0) {
+            throw IllegalStateException(
+                "Unable to create OpenGL shader"
+            )
+        }
+
+        GLES20.glShaderSource(
+            shader,
+            source
+        )
+
+        GLES20.glCompileShader(
+            shader
+        )
+
+        val status =
+            IntArray(1)
+
+        GLES20.glGetShaderiv(
+            shader,
+            GLES20.GL_COMPILE_STATUS,
+            status,
+            0
+        )
+
+        if (status[0] == 0) {
+
+            val log =
+                GLES20.glGetShaderInfoLog(
+                    shader
+                )
+
+            GLES20.glDeleteShader(
+                shader
+            )
+
+            throw IllegalStateException(
+                "Shader compilation failed: $log"
+            )
+        }
+
+        return shader
+    }
+
+    private fun createProgram(
+        vertexSource: String,
+        fragmentSource: String
+    ): Int {
+
+        val vertexShader =
+            loadShader(
+                GLES20.GL_VERTEX_SHADER,
+                vertexSource
+            )
+
+        val fragmentShader =
+            loadShader(
+                GLES20.GL_FRAGMENT_SHADER,
+                fragmentSource
+            )
+
+        val programId =
+            GLES20.glCreateProgram()
+
+        if (programId == 0) {
+
+            GLES20.glDeleteShader(
+                vertexShader
+            )
+
+            GLES20.glDeleteShader(
+                fragmentShader
+            )
+
+            throw IllegalStateException(
+                "Unable to create OpenGL program"
+            )
+        }
+
+        GLES20.glAttachShader(
+            programId,
+            vertexShader
+        )
+
+        GLES20.glAttachShader(
+            programId,
+            fragmentShader
+        )
+
+        GLES20.glLinkProgram(
+            programId
+        )
+
+        val status =
+            IntArray(1)
+
+        GLES20.glGetProgramiv(
+            programId,
+            GLES20.GL_LINK_STATUS,
+            status,
+            0
+        )
+
+        if (status[0] == 0) {
+
+            val log =
+                GLES20.glGetProgramInfoLog(
+                    programId
+                )
+
+            GLES20.glDeleteProgram(
+                programId
+            )
+
+            GLES20.glDeleteShader(
+                vertexShader
+            )
+
+            GLES20.glDeleteShader(
+                fragmentShader
+            )
+
+            throw IllegalStateException(
+                "OpenGL program link failed: $log"
+            )
+        }
+
+        GLES20.glDeleteShader(
+            vertexShader
+        )
+
+        GLES20.glDeleteShader(
+            fragmentShader
+        )
+
+        return programId
+    }
+
+    // ----------------------------------------------------------------
+    // View lifecycle
+    // ----------------------------------------------------------------
+
+    override fun onDetachedFromWindow() {
+
+        closeAr()
+
+        super.onDetachedFromWindow()
     }
 }
