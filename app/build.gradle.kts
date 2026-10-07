@@ -4,9 +4,28 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
-android { namespace = "com.networkar.app"; compileSdk = 35
-    defaultConfig { applicationId = "com.networkar.app"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "1.0" }
+android {
+    namespace = "com.networkar.app"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.networkar.app"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
 }
+
+kotlin {
+    jvmToolchain(17)
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
