@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.networkar.app
 
 import android.Manifest
@@ -188,6 +190,7 @@ class MainActivity : ComponentActivity() {
 // MAIN APP
 // =============================================================
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NetworkARApp(
     vm: MainViewModel = viewModel(),
