@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-
 data class UiState(
 
     // ---------------------------------------------------------
@@ -94,7 +93,7 @@ data class UiState(
     val wifiNetworks: List<WifiNetwork> = emptyList(),
 
     // ---------------------------------------------------------
-    // AR Scanner
+    // AR scanner
     // ---------------------------------------------------------
 
     val arSamples: Int = 0,
@@ -107,9 +106,9 @@ class MainViewModel(
     application: Application
 ) : AndroidViewModel(application) {
 
-    // ---------------------------------------------------------
-    // Room database
-    // ---------------------------------------------------------
+    // =========================================================
+    // DATABASE
+    // =========================================================
 
     private val db =
         AppDatabase.getInstance(application)
@@ -117,23 +116,23 @@ class MainViewModel(
     private val dao =
         db.measurementDao()
 
-    // ---------------------------------------------------------
-    // Network scanner
-    // ---------------------------------------------------------
+    // =========================================================
+    // NETWORK
+    // =========================================================
 
     private val networkScanner =
         NetworkScanner(application)
 
-    // ---------------------------------------------------------
-    // Speed tester
-    // ---------------------------------------------------------
+    // =========================================================
+    // SPEED TEST
+    // =========================================================
 
     private val speedTester =
         SpeedTester()
 
-    // ---------------------------------------------------------
-    // UI state
-    // ---------------------------------------------------------
+    // =========================================================
+    // UI STATE
+    // =========================================================
 
     private val _ui =
         MutableStateFlow(UiState())
@@ -141,28 +140,18 @@ class MainViewModel(
     val ui =
         _ui.asStateFlow()
 
-    // ---------------------------------------------------------
-    // Room history
-    // ---------------------------------------------------------
+    // =========================================================
+    // HISTORY
+    // =========================================================
 
     val history =
         dao.getAll()
 
 
     // =========================================================
-    // NETWORK REFRESH
+    // REFRESH NETWORK
     // =========================================================
 
-    /**
-     * Refreshes:
-     *
-     * - Current Wi-Fi
-     * - Mobile 4G/5G
-     * - Internet connectivity
-     * - Active network
-     *
-     * Does NOT perform nearby Wi-Fi scan.
-     */
     fun refresh() {
 
         viewModelScope.launch {
@@ -224,16 +213,35 @@ class MainViewModel(
                 internet = internet
             )
 
+        val mobileDbm =
+            mobile?.signalDbm
+
+        val mobilePercent =
+            if (
+                mobileDbm != null &&
+                SignalUtils.isValid(mobileDbm)
+            ) {
+                SignalUtils.percent(mobileDbm)
+            } else {
+                0
+            }
+
+        val mobileQuality =
+            if (
+                mobileDbm != null &&
+                SignalUtils.isValid(mobileDbm)
+            ) {
+                SignalUtils.quality(mobileDbm)
+            } else {
+                "UNAVAILABLE"
+            }
+
         _ui.update {
 
             it.copy(
 
-                // -------------------------------------------------
                 // Wi-Fi
-                // -------------------------------------------------
-
-                wifiDbm =
-                    wifi?.rssi ?: -100,
+                wifiDbm = wifi?.rssi ?: -100,
 
                 wifiName =
                     wifi?.ssid ?: "Wi-Fi",
@@ -244,12 +252,9 @@ class MainViewModel(
                 wifiBssid =
                     wifi?.bssid ?: "",
 
-                // -------------------------------------------------
                 // Mobile
-                // -------------------------------------------------
-
                 mobileDbm =
-                    mobile?.signalDbm,
+                    mobileDbm,
 
                 mobileType =
                     mobile?.type ?: "Mobile",
@@ -261,33 +266,12 @@ class MainViewModel(
                     mobile?.registered ?: false,
 
                 mobileSignalPercent =
-                    mobile
-                        ?.signalDbm
-                        ?.let {
-                            if (SignalUtils.isValid(it)) {
-                                SignalUtils.percent(it)
-                            } else {
-                                0
-                            }
-                        }
-                        ?: 0,
+                    mobilePercent,
 
                 mobileQuality =
-                    mobile
-                        ?.signalDbm
-                        ?.let {
-                            if (SignalUtils.isValid(it)) {
-                                SignalUtils.quality(it)
-                            } else {
-                                "UNAVAILABLE"
-                            }
-                        }
-                        ?: "UNAVAILABLE",
+                    mobileQuality,
 
-                // -------------------------------------------------
                 // Internet
-                // -------------------------------------------------
-
                 internetConnected =
                     internet.connected,
 
@@ -300,10 +284,7 @@ class MainViewModel(
                 internetMetered =
                     internet.metered,
 
-                // -------------------------------------------------
                 // Active network
-                // -------------------------------------------------
-
                 activeNetworkName =
                     activeName,
 
@@ -330,9 +311,7 @@ class MainViewModel(
 
                 wifi
                     ?.ssid
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
+                    ?.takeIf { it.isNotBlank() }
                     ?: "Wi-Fi"
             }
 
@@ -340,9 +319,7 @@ class MainViewModel(
 
                 mobile
                     ?.operator
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
+                    ?.takeIf { it.isNotBlank() }
                     ?: "Mobile Data"
             }
 
@@ -392,9 +369,7 @@ class MainViewModel(
 
                 mobile
                     ?.type
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
+                    ?.takeIf { it.isNotBlank() }
                     ?: "Mobile"
             }
 
@@ -428,9 +403,6 @@ class MainViewModel(
     // WIFI SCAN
     // =========================================================
 
-    /**
-     * Performs nearby Wi-Fi scan.
-     */
     fun scanWifi() {
 
         if (_ui.value.wifiScanning) {
@@ -481,16 +453,6 @@ class MainViewModel(
     // SPEED TEST
     // =========================================================
 
-    /**
-     * Runs:
-     *
-     * - Ping
-     * - Jitter
-     * - Download
-     * - Upload
-     *
-     * and stores the result in Room.
-     */
     fun speedTest() {
 
         if (_ui.value.testing) {
@@ -500,6 +462,7 @@ class MainViewModel(
         viewModelScope.launch {
 
             _ui.update {
+
                 it.copy(
                     testing = true
                 )
@@ -513,6 +476,7 @@ class MainViewModel(
                         runCatching {
                             speedTester.test()
                         }.getOrDefault(
+
                             SpeedResult(
                                 downloadMbps = 0.0,
                                 uploadMbps = 0.0,
@@ -540,9 +504,7 @@ class MainViewModel(
                     )
                 }
 
-                saveSpeedMeasurement(
-                    result
-                )
+                saveSpeedMeasurement(result)
 
             } finally {
 
@@ -558,7 +520,7 @@ class MainViewModel(
 
 
     // =========================================================
-    // SAVE SPEED TEST RESULT
+    // SAVE SPEED TEST
     // =========================================================
 
     private suspend fun saveSpeedMeasurement(
@@ -588,60 +550,73 @@ class MainViewModel(
 
         val signalDbm =
             if (useWifi) {
+
                 state.wifiDbm
+
             } else {
+
                 state.mobileDbm ?: -120
             }
 
         val signalPercent =
             if (SignalUtils.isValid(signalDbm)) {
-                SignalUtils.percent(signalDbm)
+
+                SignalUtils.percent(
+                    signalDbm
+                )
+
             } else {
                 0
             }
 
         val quality =
             if (SignalUtils.isValid(signalDbm)) {
-                SignalUtils.quality(signalDbm)
+
+                SignalUtils.quality(
+                    signalDbm
+                )
+
             } else {
                 "UNAVAILABLE"
             }
 
+        val measurement =
+            Measurement(
+
+                mode = "SPEED",
+
+                networkName =
+                    networkName,
+
+                networkType =
+                    networkType,
+
+                signalDbm =
+                    signalDbm,
+
+                signalPercent =
+                    signalPercent,
+
+                quality =
+                    quality,
+
+                speedMbps =
+                    result.downloadMbps,
+
+                uploadMbps =
+                    result.uploadMbps,
+
+                pingMs =
+                    result.pingMs.toLong(),
+
+                jitterMs =
+                    result.jitterMs.toLong()
+            )
+
         withContext(Dispatchers.IO) {
 
             dao.insert(
-
-                Measurement(
-
-                    mode = "SPEED",
-
-                    networkName =
-                        networkName,
-
-                    networkType =
-                        networkType,
-
-                    signalDbm =
-                        signalDbm,
-
-                    signalPercent =
-                        signalPercent,
-
-                    quality =
-                        quality,
-
-                    speedMbps =
-                        result.downloadMbps,
-
-                    uploadMbps =
-                        result.uploadMbps,
-
-                    pingMs =
-                        result.pingMs.toLong(),
-
-                    jitterMs =
-                        result.jitterMs.toLong()
-                )
+                measurement
             )
         }
     }
@@ -651,9 +626,6 @@ class MainViewModel(
     // NORMAL SIGNAL SAMPLE
     // =========================================================
 
-    /**
-     * Saves current Wi-Fi/mobile signal into Room.
-     */
     fun sample() {
 
         viewModelScope.launch {
@@ -679,25 +651,21 @@ class MainViewModel(
             val signalDbm =
                 if (useWifi) {
 
-                    status.wifi?.rssi
-                        ?: -100
+                    status.wifi?.rssi ?: -100
 
                 } else {
 
-                    status.mobile?.signalDbm
-                        ?: -120
+                    status.mobile?.signalDbm ?: -120
                 }
 
             val networkName =
                 if (useWifi) {
 
-                    status.wifi?.ssid
-                        ?: "Wi-Fi"
+                    status.wifi?.ssid ?: "Wi-Fi"
 
                 } else {
 
-                    status.mobile?.operator
-                        ?: "Mobile"
+                    status.mobile?.operator ?: "Mobile"
                 }
 
             val networkType =
@@ -707,8 +675,7 @@ class MainViewModel(
 
                 } else {
 
-                    status.mobile?.type
-                        ?: "Mobile"
+                    status.mobile?.type ?: "Mobile"
                 }
 
             val signalPercent =
@@ -733,30 +700,32 @@ class MainViewModel(
                     "UNAVAILABLE"
                 }
 
+            val measurement =
+                Measurement(
+
+                    mode = "SIGNAL",
+
+                    networkName =
+                        networkName,
+
+                    networkType =
+                        networkType,
+
+                    signalDbm =
+                        signalDbm,
+
+                    signalPercent =
+                        signalPercent,
+
+                    quality =
+                        quality
+                )
+
             withContext(Dispatchers.IO) {
 
                 dao.insert(
-
-                    Measurement(
-
-                        mode = "SIGNAL",
-
-                        networkName =
-                            networkName,
-
-                        networkType =
-                            networkType,
-
-                        signalDbm =
-                            signalDbm,
-
-                        signalPercent =
-                            signalPercent,
-
-                        quality =
-                            quality
-                    )
-                }
+                    measurement
+                )
             }
         }
     }
@@ -766,11 +735,6 @@ class MainViewModel(
     // AR SAMPLE
     // =========================================================
 
-    /**
-     * Stores one AR signal measurement.
-     *
-     * x/y/z represent AR world position.
-     */
     fun arSample(
         x: Float,
         y: Float,
@@ -781,7 +745,9 @@ class MainViewModel(
         val quality =
             if (SignalUtils.isValid(dbm)) {
 
-                SignalUtils.quality(dbm)
+                SignalUtils.quality(
+                    dbm
+                )
 
             } else {
                 "UNAVAILABLE"
@@ -790,7 +756,9 @@ class MainViewModel(
         val signalPercent =
             if (SignalUtils.isValid(dbm)) {
 
-                SignalUtils.percent(dbm)
+                SignalUtils.percent(
+                    dbm
+                )
 
             } else {
                 0
@@ -819,35 +787,40 @@ class MainViewModel(
 
         viewModelScope.launch {
 
+            val measurement =
+                Measurement(
+
+                    mode = "AR_SCAN",
+
+                    networkName =
+                        state.wifiName,
+
+                    networkType =
+                        "Wi-Fi",
+
+                    signalDbm =
+                        dbm,
+
+                    signalPercent =
+                        signalPercent,
+
+                    quality =
+                        quality,
+
+                    x =
+                        x,
+
+                    y =
+                        y,
+
+                    z =
+                        z
+                )
+
             withContext(Dispatchers.IO) {
 
                 dao.insert(
-
-                    Measurement(
-
-                        mode = "AR_SCAN",
-
-                        networkName =
-                            state.wifiName,
-
-                        networkType =
-                            "Wi-Fi",
-
-                        signalDbm =
-                            dbm,
-
-                        signalPercent =
-                            signalPercent,
-
-                        quality =
-                            quality,
-
-                        x = x,
-
-                        y = y,
-
-                        z = z
-                    )
+                    measurement
                 )
             }
         }
@@ -915,7 +888,7 @@ class MainViewModel(
 
         super.onCleared()
 
-        // AppDatabase singleton ko yahan close nahi karna.
-        // Room database application lifetime tak available rahega.
+        // AppDatabase is a singleton.
+        // Do not close it here because other components may use it.
     }
 }
