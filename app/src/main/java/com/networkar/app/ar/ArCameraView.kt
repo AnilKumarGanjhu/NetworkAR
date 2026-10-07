@@ -31,7 +31,7 @@ class ArCameraView @JvmOverloads constructor(
     defStyleAttr: Int = 0,
     private val onSample: (x: Float, y: Float, z: Float, dbm: Int) -> Unit = { _, _, _, _ -> },
     private val onStatus: (String) -> Unit = {}
-) : GLSurfaceView(context, attrs, defStyleAttr),
+) : GLSurfaceView(context, attrs),
     GLSurfaceView.Renderer,
     SurfaceTexture.OnFrameAvailableListener {
 
