@@ -4,92 +4,945 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
-import com.networkar.app.data.*
-import com.networkar.app.network.*
+import com.networkar.app.data.AppDatabase
+import com.networkar.app.data.Measurement
+import com.networkar.app.network.InternetInfo
+import com.networkar.app.network.MobileNetwork
+import com.networkar.app.network.NetworkScanner
+import com.networkar.app.network.NetworkStatus
+import com.networkar.app.network.SignalUtils
+import com.networkar.app.network.SpeedResult
+import com.networkar.app.network.SpeedTester
+import com.networkar.app.network.WifiNetwork
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-
+import kotlinx.coroutines.withContext
 
 data class UiState(
-    val wifiDbm:Int=-100,
-    val wifiName:String="Wi-Fi",
-    val wifiFrequency:Int=0,
-    val wifiBssid:String="",
-    val mobileDbm:Int=-120,
-    val mobileType:String="Mobile",
-    val speed:Double=0.0,
-    val upload:Double=0.0,
-    val ping:Double=0.0,
-    val jitter:Double=0.0,
-    val testing:Boolean=false,
-    val wifiScanning:Boolean=false,
-    val wifiNetworks:List<WifiInfo> = emptyList(),
-    val arSamples:Int=0,
-    val arStatus:String="Ready"
+
+    // ---------------------------------------------------------
+    // Wi-Fi
+    // ---------------------------------------------------------
+
+    val wifiDbm: Int = -100,
+
+    val wifiName: String = "Wi-Fi",
+
+    val wifiFrequency: Int = 0,
+
+    val wifiBssid: String = "",
+
+    // ---------------------------------------------------------
+    // Mobile 4G / 5G
+    // ---------------------------------------------------------
+
+    val mobileDbm: Int? = null,
+
+    val mobileType: String = "Mobile",
+
+    val mobileOperator: String = "Unknown operator",
+
+    val mobileRegistered: Boolean = false,
+
+    val mobileSignalPercent: Int = 0,
+
+    val mobileQuality: String = "UNAVAILABLE",
+
+    // ---------------------------------------------------------
+    // Internet
+    // ---------------------------------------------------------
+
+    val internetConnected: Boolean = false,
+
+    val internetValidated: Boolean = false,
+
+    val internetTransport: String = "NONE",
+
+    val internetMetered: Boolean = false,
+
+    // ---------------------------------------------------------
+    // Active network
+    // ---------------------------------------------------------
+
+    val activeNetworkName: String = "No network",
+
+    val activeNetworkType: String = "NONE",
+
+    // ---------------------------------------------------------
+    // Speed test
+    // ---------------------------------------------------------
+
+    val speed: Double = 0.0,
+
+    val upload: Double = 0.0,
+
+    val ping: Double = 0.0,
+
+    val jitter: Double = 0.0,
+
+    val testing: Boolean = false,
+
+    // ---------------------------------------------------------
+    // Wi-Fi scanner
+    // ---------------------------------------------------------
+
+    val wifiScanning: Boolean = false,
+
+    val wifiNetworks: List<WifiNetwork> = emptyList(),
+
+    // ---------------------------------------------------------
+    // AR Scanner
+    // ---------------------------------------------------------
+
+    val arSamples: Int = 0,
+
+    val arStatus: String = "Ready"
 )
 
-class MainViewModel(a:Application):AndroidViewModel(a){
-    private val db= Room.databaseBuilder(a,AppDatabase::class.java,"networkar.db").fallbackToDestructiveMigration().build()
-    private val w= WifiScanner(a)
-    private val m= MobileNetworkScanner(a)
-    private val t= SpeedTester()
-    private val _ui= MutableStateFlow(UiState())
-    val ui=_ui.asStateFlow()
-    val history=db.measurementDao().all()
 
-    fun refresh(){
-        val wi=runCatching{w.current()}.getOrNull()
-        val mo=runCatching{m.current()}.getOrNull()
-        _ui.update{it.copy(
-            wifiDbm=wi?.rssi?:-100,
-            wifiName=wi?.ssid?:"Wi-Fi",
-            wifiFrequency=wi?.frequency?:0,
-            wifiBssid=wi?.bssid?:"",
-            mobileDbm=mo?.dbm?:-120,
-            mobileType=mo?.type?:"Mobile"
-        )}
-    }
+class MainViewModel(
+    application: Application
+) : AndroidViewModel(application) {
 
-    fun scanWifi(){
-        if(_ui.value.wifiScanning)return
-        viewModelScope.launch{
-            _ui.update{it.copy(wifiScanning=true)}
-            val results=runCatching{w.scan()}.getOrDefault(emptyList())
-            _ui.update{it.copy(wifiNetworks=results,wifiScanning=false)}
+    // ---------------------------------------------------------
+    // Room database
+    // ---------------------------------------------------------
+
+    private val db =
+        Room.databaseBuilder(
+            application.applicationContext,
+            AppDatabase::class.java,
+            "networkar.db"
+        )
+            .fallbackToDestructiveMigration()
+            .build()
+
+    // ---------------------------------------------------------
+    // Network scanner
+    // ---------------------------------------------------------
+
+    private val networkScanner =
+        NetworkScanner(application)
+
+    // ---------------------------------------------------------
+    // Speed tester
+    // ---------------------------------------------------------
+
+    private val speedTester =
+        SpeedTester()
+
+    // ---------------------------------------------------------
+    // UI state
+    // ---------------------------------------------------------
+
+    private val _ui =
+        MutableStateFlow(UiState())
+
+    val ui =
+        _ui.asStateFlow()
+
+    // ---------------------------------------------------------
+    // Room history
+    // ---------------------------------------------------------
+
+    val history =
+        db.measurementDao().all()
+
+
+    // =========================================================
+    // NETWORK REFRESH
+    // =========================================================
+
+    /**
+     * Refreshes:
+     *
+     * - Current Wi-Fi
+     * - Mobile 4G/5G
+     * - Internet connectivity
+     * - Active network
+     *
+     * This does NOT perform a nearby Wi-Fi scan.
+     */
+    fun refresh() {
+
+        viewModelScope.launch {
+
+            val status =
+                withContext(Dispatchers.IO) {
+
+                    runCatching {
+                        networkScanner.getStatus()
+                    }.getOrElse {
+
+                        NetworkStatus(
+                            wifi = null,
+                            wifiNetworks = emptyList(),
+                            mobile = null,
+                            internet = InternetInfo(
+                                connected = false,
+                                validated = false,
+                                transport = "NONE",
+                                metered = false
+                            )
+                        )
+                    }
+                }
+
+            applyNetworkStatus(status)
         }
     }
 
-    fun speedTest(){
-        if(_ui.value.testing)return
-        viewModelScope.launch{
-            _ui.update{it.copy(testing=true)}
-            val r=runCatching{t.test()}.getOrDefault(SpeedResult(0.0,0.0,0.0,0.0))
-            _ui.update{it.copy(speed=r.downloadMbps,upload=r.uploadMbps,ping=r.pingMs,jitter=r.jitterMs,testing=false)}
-            val u=_ui.value
-            db.measurementDao().insert(Measurement(mode="SPEED",networkName=u.wifiName,networkType="Wi-Fi/Mobile",signalDbm=u.wifiDbm,signalPercent=SignalUtils.percent(u.wifiDbm),quality=SignalUtils.quality(u.wifiDbm),speedMbps=r.downloadMbps,uploadMbps=r.uploadMbps,pingMs=r.pingMs,jitterMs=r.jitterMs))
+
+    // =========================================================
+    // APPLY NETWORK STATUS
+    // =========================================================
+
+    private fun applyNetworkStatus(
+        status: NetworkStatus
+    ) {
+
+        val wifi =
+            status.wifi
+
+        val mobile =
+            status.mobile
+
+        val internet =
+            status.internet
+
+        val activeName =
+            getActiveNetworkName(
+                wifi = wifi,
+                mobile = mobile,
+                internet = internet
+            )
+
+        val activeType =
+            getActiveNetworkType(
+                wifi = wifi,
+                mobile = mobile,
+                internet = internet
+            )
+
+        _ui.update {
+
+            it.copy(
+
+                // -------------------------------------------------
+                // Wi-Fi
+                // -------------------------------------------------
+
+                wifiDbm =
+                    wifi?.rssi ?: -100,
+
+                wifiName =
+                    wifi?.ssid ?: "Wi-Fi",
+
+                wifiFrequency =
+                    wifi?.frequency ?: 0,
+
+                wifiBssid =
+                    wifi?.bssid ?: "",
+
+                // -------------------------------------------------
+                // Mobile
+                // -------------------------------------------------
+
+                mobileDbm =
+                    mobile?.signalDbm,
+
+                mobileType =
+                    mobile?.type ?: "Mobile",
+
+                mobileOperator =
+                    mobile?.operator ?: "Unknown operator",
+
+                mobileRegistered =
+                    mobile?.registered ?: false,
+
+                mobileSignalPercent =
+                    mobile
+                        ?.signalDbm
+                        ?.let {
+                            if (SignalUtils.isValid(it)) {
+                                SignalUtils.percent(it)
+                            } else {
+                                0
+                            }
+                        }
+                        ?: 0,
+
+                mobileQuality =
+                    mobile
+                        ?.signalDbm
+                        ?.let {
+                            if (SignalUtils.isValid(it)) {
+                                SignalUtils.quality(it)
+                            } else {
+                                "UNAVAILABLE"
+                            }
+                        }
+                        ?: "UNAVAILABLE",
+
+                // -------------------------------------------------
+                // Internet
+                // -------------------------------------------------
+
+                internetConnected =
+                    internet.connected,
+
+                internetValidated =
+                    internet.validated,
+
+                internetTransport =
+                    internet.transport,
+
+                internetMetered =
+                    internet.metered,
+
+                // -------------------------------------------------
+                // Active network
+                // -------------------------------------------------
+
+                activeNetworkName =
+                    activeName,
+
+                activeNetworkType =
+                    activeType
+            )
         }
     }
 
-    fun sample(){
-        refresh()
-        val u=_ui.value
-        viewModelScope.launch{db.measurementDao().insert(Measurement(mode="SIGNAL",networkName=u.wifiName,networkType="Wi-Fi",signalDbm=u.wifiDbm,signalPercent=SignalUtils.percent(u.wifiDbm),quality=SignalUtils.quality(u.wifiDbm)))}
-    }
 
-    fun arSample(x:Float,y:Float,z:Float,dbm:Int){
-        val quality=SignalUtils.quality(dbm)
-        val u=_ui.value
-        _ui.update{it.copy(wifiDbm=dbm,arSamples=it.arSamples+1,arStatus="Scanning • ${it.arSamples+1} points")}
-        viewModelScope.launch{
-            db.measurementDao().insert(Measurement(mode="AR_SCAN",networkName=u.wifiName,networkType="Wi-Fi",signalDbm=dbm,signalPercent=SignalUtils.percent(dbm),quality=quality,x=x,y=y,z=z))
+    // =========================================================
+    // ACTIVE NETWORK NAME
+    // =========================================================
+
+    private fun getActiveNetworkName(
+        wifi: WifiNetwork?,
+        mobile: MobileNetwork?,
+        internet: InternetInfo
+    ): String {
+
+        return when (internet.transport) {
+
+            "Wi-Fi" -> {
+
+                wifi
+                    ?.ssid
+                    ?.takeIf {
+                        it.isNotBlank()
+                    }
+                    ?: "Wi-Fi"
+            }
+
+            "Mobile Data" -> {
+
+                mobile
+                    ?.operator
+                    ?.takeIf {
+                        it.isNotBlank()
+                    }
+                    ?: "Mobile Data"
+            }
+
+            "Ethernet" -> {
+                "Ethernet"
+            }
+
+            "VPN" -> {
+                "VPN"
+            }
+
+            else -> {
+
+                when {
+
+                    wifi != null ->
+                        wifi.ssid
+
+                    mobile != null ->
+                        mobile.operator
+
+                    else ->
+                        "No network"
+                }
+            }
         }
     }
 
-    fun arStatus(status:String){_ui.update{it.copy(arStatus=status)}}
 
-    fun resetArCount(){_ui.update{it.copy(arSamples=0,arStatus="Ready")}}
+    // =========================================================
+    // ACTIVE NETWORK TYPE
+    // =========================================================
 
-    fun clearHistory(){viewModelScope.launch{db.measurementDao().clear();resetArCount()}}
+    private fun getActiveNetworkType(
+        wifi: WifiNetwork?,
+        mobile: MobileNetwork?,
+        internet: InternetInfo
+    ): String {
+
+        return when (internet.transport) {
+
+            "Wi-Fi" -> {
+                "Wi-Fi"
+            }
+
+            "Mobile Data" -> {
+
+                mobile
+                    ?.type
+                    ?.takeIf {
+                        it.isNotBlank()
+                    }
+                    ?: "Mobile"
+            }
+
+            "Ethernet" -> {
+                "Ethernet"
+            }
+
+            "VPN" -> {
+                "VPN"
+            }
+
+            else -> {
+
+                when {
+
+                    wifi != null ->
+                        "Wi-Fi"
+
+                    mobile != null ->
+                        mobile.type
+
+                    else ->
+                        "NONE"
+                }
+            }
+        }
+    }
+
+
+    // =========================================================
+    // WIFI SCAN
+    // =========================================================
+
+    /**
+     * Performs a nearby Wi-Fi scan.
+     *
+     * This is intentionally separate from refresh()
+     * because Android can throttle Wi-Fi scans.
+     */
+    fun scanWifi() {
+
+        if (_ui.value.wifiScanning) {
+            return
+        }
+
+        viewModelScope.launch {
+
+            _ui.update {
+                it.copy(
+                    wifiScanning = true
+                )
+            }
+
+            try {
+
+                val results =
+                    withContext(Dispatchers.IO) {
+
+                        runCatching {
+                            networkScanner.scanWifi()
+                        }.getOrDefault(
+                            emptyList()
+                        )
+                    }
+
+                _ui.update {
+
+                    it.copy(
+                        wifiNetworks = results
+                    )
+                }
+
+            } finally {
+
+                _ui.update {
+
+                    it.copy(
+                        wifiScanning = false
+                    )
+                }
+            }
+        }
+    }
+
+
+    // =========================================================
+    // SPEED TEST
+    // =========================================================
+
+    /**
+     * Runs:
+     *
+     * - Ping
+     * - Jitter
+     * - Download
+     * - Upload
+     *
+     * and stores the result in Room.
+     */
+    fun speedTest() {
+
+        if (_ui.value.testing) {
+            return
+        }
+
+        viewModelScope.launch {
+
+            _ui.update {
+                it.copy(
+                    testing = true
+                )
+            }
+
+            try {
+
+                val result =
+                    withContext(Dispatchers.IO) {
+
+                        runCatching {
+                            speedTester.test()
+                        }.getOrDefault(
+                            SpeedResult(
+                                downloadMbps = 0.0,
+                                uploadMbps = 0.0,
+                                pingMs = 0.0,
+                                jitterMs = 0.0
+                            )
+                        )
+                    }
+
+                _ui.update {
+
+                    it.copy(
+
+                        speed =
+                            result.downloadMbps,
+
+                        upload =
+                            result.uploadMbps,
+
+                        ping =
+                            result.pingMs,
+
+                        jitter =
+                            result.jitterMs
+                    )
+                }
+
+                saveSpeedMeasurement(
+                    result
+                )
+
+            } finally {
+
+                _ui.update {
+
+                    it.copy(
+                        testing = false
+                    )
+                }
+            }
+        }
+    }
+
+
+    // =========================================================
+    // SAVE SPEED TEST RESULT
+    // =========================================================
+
+    private suspend fun saveSpeedMeasurement(
+        result: SpeedResult
+    ) {
+
+        val state =
+            _ui.value
+
+        val useWifi =
+            state.internetTransport == "Wi-Fi" &&
+                state.wifiName != "Wi-Fi"
+
+        val networkName =
+            if (useWifi) {
+                state.wifiName
+            } else {
+                state.mobileOperator
+            }
+
+        val networkType =
+            if (useWifi) {
+                "Wi-Fi"
+            } else {
+                state.mobileType
+            }
+
+        val signalDbm =
+            if (useWifi) {
+
+                state.wifiDbm
+
+            } else {
+
+                state.mobileDbm
+                    ?: -120
+            }
+
+        val signalPercent =
+            if (SignalUtils.isValid(signalDbm)) {
+
+                SignalUtils.percent(
+                    signalDbm
+                )
+
+            } else {
+                0
+            }
+
+        val quality =
+            if (SignalUtils.isValid(signalDbm)) {
+
+                SignalUtils.quality(
+                    signalDbm
+                )
+
+            } else {
+                "UNAVAILABLE"
+            }
+
+        withContext(Dispatchers.IO) {
+
+            db.measurementDao().insert(
+
+                Measurement(
+
+                    mode = "SPEED",
+
+                    networkName =
+                        networkName,
+
+                    networkType =
+                        networkType,
+
+                    signalDbm =
+                        signalDbm,
+
+                    signalPercent =
+                        signalPercent,
+
+                    quality =
+                        quality,
+
+                    speedMbps =
+                        result.downloadMbps,
+
+                    uploadMbps =
+                        result.uploadMbps,
+
+                    pingMs =
+                        result.pingMs,
+
+                    jitterMs =
+                        result.jitterMs
+                )
+            )
+        }
+    }
+
+
+    // =========================================================
+    // NORMAL SIGNAL SAMPLE
+    // =========================================================
+
+    /**
+     * Saves the current network signal
+     * into Room history.
+     */
+    fun sample() {
+
+        viewModelScope.launch {
+
+            val status =
+                withContext(Dispatchers.IO) {
+
+                    runCatching {
+                        networkScanner.getStatus()
+                    }.getOrNull()
+                }
+
+            if (status == null) {
+                return@launch
+            }
+
+            applyNetworkStatus(
+                status
+            )
+
+            val state =
+                _ui.value
+
+            val useWifi =
+                status.internet.transport == "Wi-Fi" &&
+                    status.wifi != null
+
+            val signalDbm =
+                if (useWifi) {
+
+                    status.wifi?.rssi
+                        ?: -100
+
+                } else {
+
+                    status.mobile?.signalDbm
+                        ?: -120
+                }
+
+            val networkName =
+                if (useWifi) {
+
+                    status.wifi?.ssid
+                        ?: "Wi-Fi"
+
+                } else {
+
+                    status.mobile?.operator
+                        ?: "Mobile"
+                }
+
+            val networkType =
+                if (useWifi) {
+
+                    "Wi-Fi"
+
+                } else {
+
+                    status.mobile?.type
+                        ?: "Mobile"
+                }
+
+            val signalPercent =
+                if (SignalUtils.isValid(signalDbm)) {
+
+                    SignalUtils.percent(
+                        signalDbm
+                    )
+
+                } else {
+                    0
+                }
+
+            val quality =
+                if (SignalUtils.isValid(signalDbm)) {
+
+                    SignalUtils.quality(
+                        signalDbm
+                    )
+
+                } else {
+                    "UNAVAILABLE"
+                }
+
+            withContext(Dispatchers.IO) {
+
+                db.measurementDao().insert(
+
+                    Measurement(
+
+                        mode = "SIGNAL",
+
+                        networkName =
+                            networkName,
+
+                        networkType =
+                            networkType,
+
+                        signalDbm =
+                            signalDbm,
+
+                        signalPercent =
+                            signalPercent,
+
+                        quality =
+                            quality
+                    )
+                }
+            }
+        }
+    }
+
+
+    // =========================================================
+    // AR SAMPLE
+    // =========================================================
+
+    /**
+     * Stores one AR signal measurement.
+     *
+     * x/y/z represent the AR world position.
+     */
+    fun arSample(
+        x: Float,
+        y: Float,
+        z: Float,
+        dbm: Int
+    ) {
+
+        val quality =
+            if (SignalUtils.isValid(dbm)) {
+
+                SignalUtils.quality(
+                    dbm
+                )
+
+            } else {
+                "UNAVAILABLE"
+            }
+
+        val signalPercent =
+            if (SignalUtils.isValid(dbm)) {
+
+                SignalUtils.percent(
+                    dbm
+                )
+
+            } else {
+                0
+            }
+
+        val state =
+            _ui.value
+
+        val nextCount =
+            state.arSamples + 1
+
+        _ui.update {
+
+            it.copy(
+
+                wifiDbm =
+                    dbm,
+
+                arSamples =
+                    nextCount,
+
+                arStatus =
+                    "Scanning • $nextCount points"
+            )
+        }
+
+        viewModelScope.launch {
+
+            withContext(Dispatchers.IO) {
+
+                db.measurementDao().insert(
+
+                    Measurement(
+
+                        mode = "AR_SCAN",
+
+                        networkName =
+                            state.wifiName,
+
+                        networkType =
+                            "Wi-Fi",
+
+                        signalDbm =
+                            dbm,
+
+                        signalPercent =
+                            signalPercent,
+
+                        quality =
+                            quality,
+
+                        x = x,
+
+                        y = y,
+
+                        z = z
+                    )
+                )
+            }
+        }
+    }
+
+
+    // =========================================================
+    // AR STATUS
+    // =========================================================
+
+    fun arStatus(
+        status: String
+    ) {
+
+        _ui.update {
+
+            it.copy(
+                arStatus = status
+            )
+        }
+    }
+
+
+    // =========================================================
+    // RESET AR
+    // =========================================================
+
+    fun resetArCount() {
+
+        _ui.update {
+
+            it.copy(
+
+                arSamples = 0,
+
+                arStatus = "Ready"
+            )
+        }
+    }
+
+
+    // =========================================================
+    // CLEAR HISTORY
+    // =========================================================
+
+    fun clearHistory() {
+
+        viewModelScope.launch {
+
+            withContext(Dispatchers.IO) {
+
+                db.measurementDao().clear()
+            }
+
+            resetArCount()
+        }
+    }
+
+
+    // =========================================================
+    // CLEANUP
+    // =========================================================
+
+    override fun onCleared() {
+
+        super.onCleared()
+
+        db.close()
+    }
 }
