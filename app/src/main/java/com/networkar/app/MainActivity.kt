@@ -352,6 +352,7 @@ fun NetworkARApp(
                         ui,
                         vm,
                         requestPermissions,
+                        { selectedTab = it },
                         Modifier.padding(padding)
                     )
 
@@ -399,6 +400,7 @@ private fun Dashboard(
     u: UiState,
     vm: MainViewModel,
     requestPermissions: () -> Unit,
+    onNavigate: (Int) -> Unit,
     modifier: Modifier
 ) {
 
@@ -485,7 +487,8 @@ private fun Dashboard(
 
             QuickActions(
                 vm,
-                requestPermissions
+                requestPermissions,
+                onNavigate
             )
         }
     }
@@ -859,7 +862,8 @@ private fun InternetCard(
 @Composable
 private fun QuickActions(
     vm: MainViewModel,
-    requestPermissions: () -> Unit
+    requestPermissions: () -> Unit,
+    onNavigate: (Int) -> Unit
 ) {
 
     Column {
@@ -887,8 +891,10 @@ private fun QuickActions(
                     Icons.Default.Wifi,
                 text =
                     "Scan Wi-Fi",
-                onClick =
-                    vm::scanWifi,
+                onClick = {
+                    vm.scanWifi()
+                    onNavigate(1)
+                },
                 modifier =
                     Modifier.weight(1f)
             )
@@ -898,8 +904,10 @@ private fun QuickActions(
                     Icons.Default.Speed,
                 text =
                     "Speed Test",
-                onClick =
-                    vm::speedTest,
+                onClick = {
+                    vm.speedTest()
+                    onNavigate(2)
+                },
                 modifier =
                     Modifier.weight(1f)
             )
@@ -909,8 +917,10 @@ private fun QuickActions(
                     Icons.Default.ViewInAr,
                 text =
                     "AR Scan",
-                onClick =
-                    requestPermissions,
+                onClick = {
+                    requestPermissions()
+                    onNavigate(3)
+                },
                 modifier =
                     Modifier.weight(1f)
             )
