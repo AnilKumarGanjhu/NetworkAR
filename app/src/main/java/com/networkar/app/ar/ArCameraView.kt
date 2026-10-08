@@ -787,6 +787,9 @@ class ArCameraView @JvmOverloads constructor(
 
         val dbm =
             wifi?.rssi
+                ?.takeIf {
+                    com.networkar.app.network.SignalUtils.isValid(it)
+                }
                 ?: return
 
         lastSampleTime =
