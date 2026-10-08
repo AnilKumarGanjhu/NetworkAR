@@ -504,7 +504,13 @@ class MainViewModel(
                     )
                 }
 
-                saveSpeedMeasurement(result)
+                // Do not store failed tests (all zeros) in history.
+                if (
+                    result.downloadMbps > 0.0 ||
+                    result.uploadMbps > 0.0
+                ) {
+                    saveSpeedMeasurement(result)
+                }
 
             } finally {
 
