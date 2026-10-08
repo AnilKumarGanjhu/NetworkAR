@@ -1426,9 +1426,14 @@ private fun ArScreen(
                 mutableStateOf<ArCameraView?>(null)
             }
 
+    LaunchedEffect(permissionVersion, cameraView) {
+        if (permissionVersion > 0) {
+            cameraView?.resumeAr()
+        }
+    }
+
     DisposableEffect(
-        lifecycle,
-        permissionVersion
+        lifecycle
     ) {
 
         val observer =
@@ -1598,8 +1603,20 @@ private fun ArScreen(
                     ) {
 
                         Button(
-                            onClick =
-                                requestPermissions,
+                            onClick = {
+                                val granted =
+                                    androidx.core.content.ContextCompat
+                                        .checkSelfPermission(
+                                            context,
+                                            android.Manifest.permission.CAMERA
+                                        ) ==
+                                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (granted) {
+                                    cameraView?.resumeAr()
+                                } else {
+                                    requestPermissions()
+                                }
+                            },
                             modifier =
                                 Modifier.weight(1f)
                         ) {
